@@ -209,7 +209,12 @@ __marimo__/
 # Node.js
 node_modules/
 dist/
-.tsbuildinfo
+*.tsbuildinfo
+*.d.ts
+*.d.ts.map
+frontend/src/**/*.js
+!frontend/postcss.config.js
+!frontend/tailwind.config.ts
 
 # Docker
 postgres_data/
