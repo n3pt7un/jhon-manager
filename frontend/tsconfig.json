@@ -12,7 +12,6 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "noEmit": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
@@ -21,6 +20,6 @@
     "allowImportingTsExtensions": true,
     "lib": ["ES2020", "DOM", "DOM.Iterable"]
   },
-  "include": ["src"],
+  "files": [],
   "references": [{ "path": "./tsconfig.app.json" }]
 }
