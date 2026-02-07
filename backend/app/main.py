@@ -12,17 +12,16 @@ from app.api.router import api_router
 from app.config import settings
 from app.core.middleware import RequestLoggingMiddleware
 from app.database import engine
+from app.services.process_manager import ClaudeProcessManager
+from app.services.queue_manager import QueueManager
+from app.services.stream_manager import StreamManager
 
 logger = structlog.get_logger(__name__)
-
-# Module-level references for health checks
-_redis: Redis | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application lifespan: connect to Redis and verify DB on startup, cleanup on shutdown."""
-    global _redis
+    """Application lifespan: initialize services on startup, cleanup on shutdown."""
 
     # Verify database connection
     try:
@@ -33,23 +32,57 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await logger.aerror("database_connection_failed", error=str(exc))
 
     # Connect to Redis
+    redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
     try:
-        _redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
-        await _redis.ping()
+        await redis.ping()
         await logger.ainfo("redis_connected")
     except Exception as exc:
         await logger.aerror("redis_connection_failed", error=str(exc))
-        _redis = None
+
+    # Initialize services
+    stream_manager = StreamManager()
+    process_manager = ClaudeProcessManager()
+    queue_manager = QueueManager(
+        redis=redis,
+        process_manager=process_manager,
+        stream_manager=stream_manager,
+    )
+
+    # Wire ProcessManager output to StreamManager broadcasts
+    async def on_output(instance_id, task_id, line, stream_name):
+        from datetime import datetime, timezone
+
+        await stream_manager.broadcast(instance_id, {
+            "type": "output",
+            "instance_id": str(instance_id),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "data": {
+                "task_id": str(task_id),
+                "line": line,
+                "stream": stream_name,
+            },
+        })
+
+    process_manager.on_output(on_output)
+
+    # Store services on app.state for dependency injection
+    app.state.redis = redis
+    app.state.stream_manager = stream_manager
+    app.state.process_manager = process_manager
+    app.state.queue_manager = queue_manager
+
+    # Start background queue processing
+    await queue_manager.start()
 
     await logger.ainfo("application_started", version=__version__)
 
     yield
 
     # Shutdown
-    if _redis is not None:
-        await _redis.aclose()
-        _redis = None
-
+    await queue_manager.stop()
+    await process_manager.stop_all()
+    await stream_manager.close()
+    await redis.aclose()
     await engine.dispose()
     await logger.ainfo("application_shutdown")
 
@@ -81,11 +114,10 @@ def create_app() -> FastAPI:
     # Health endpoint
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:
-        """Health check endpoint returning DB and Redis status."""
+        """Health check endpoint returning DB, Redis, and services status."""
         db_ok = False
         redis_ok = False
 
-        # Check database
         try:
             async with engine.begin() as conn:
                 await conn.execute(text("SELECT 1"))
@@ -93,13 +125,16 @@ def create_app() -> FastAPI:
         except Exception:
             pass
 
-        # Check Redis
         try:
-            if _redis is not None:
-                await _redis.ping()
+            redis: Redis | None = getattr(app.state, "redis", None)
+            if redis is not None:
+                await redis.ping()
                 redis_ok = True
         except Exception:
             pass
+
+        stream_mgr: StreamManager | None = getattr(app.state, "stream_manager", None)
+        queue_running = getattr(app.state, "queue_manager", None) is not None
 
         overall = "healthy" if (db_ok and redis_ok) else "degraded"
 
@@ -109,6 +144,8 @@ def create_app() -> FastAPI:
             "services": {
                 "database": "connected" if db_ok else "disconnected",
                 "redis": "connected" if redis_ok else "disconnected",
+                "queue_manager": "running" if queue_running else "stopped",
+                "websocket_clients": stream_mgr.get_total_connections() if stream_mgr else 0,
             },
         }
 
