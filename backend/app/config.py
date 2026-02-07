@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -16,6 +17,13 @@ class Settings(BaseSettings):
     QUEUE_POLL_INTERVAL: float = 1.0
     COST_PER_INPUT_TOKEN: float = 0.003
     COST_PER_OUTPUT_TOKEN: float = 0.015
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v: str | list[str]) -> list[str]:
+        if isinstance(v, str):
+            return [origin.strip() for origin in v.split(",") if origin.strip()]
+        return v
 
     model_config = {
         "env_file": ".env",
